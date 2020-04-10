@@ -7,6 +7,7 @@ import aiohttp
 from aiohttp import web
 import requests
 import motor.motor_asyncio as aiomotor
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 
 TOKEN = os.environ.get("API_TOKEN")
@@ -60,7 +61,7 @@ async def handler_adverts(request):
 async def init_mongo(loop):
     url = f"mongodb://{os.environ.get('MONGO_HOST', 'localhost')}:{os.environ.get('MONGO_PORT', 27017)}"
     conn = aiomotor.AsyncIOMotorClient(url, maxPoolSize=2, io_loop=loop)
-    db = os.environ.get('DB_NAME')
+    db = os.environ.get("DB_NAME")
     return conn[db]
 
 
@@ -79,11 +80,30 @@ def get_exchange_rate():
     response = requests.get(exchange_url)
     iterator = (x.decode("utf-8") for x in response.iter_lines(decode_unicode=True))
     reader = csv.reader(iterator, delimiter=";")
-    usd_row = next(filter(lambda x: x[0] == "Euro", reader), None)
-    return float(usd_row[-1].replace(",", ".")) if usd_row else None
+    eur_row = next(filter(lambda x: x[0] == "Euro", reader), None)
+    return float(eur_row[-1].replace(",", ".")) if eur_row else None
+
+
+async def check_for_new_adverts():
+    print("Checking for new adverts")
+    auth = aiohttp.BasicAuth(login=TOKEN, password="", encoding="utf-8")
+    db = await init_mongo(asyncio.get_event_loop())
+    db_adverts = await db["adverts"].distinct("id")
+
+    async with aiohttp.ClientSession(auth=auth) as session:
+        api_adverts = await fetch_resource(session, f"{API_BASE_URL}/adverts?lang=ro")
+
+    new_adverts = [adv for adv in api_adverts["adverts"] if adv["id"] not in db_adverts]
+
+    if new_adverts:
+        db_response = await db.adverts.insert_many(new_adverts)
+        print(f"Inserted {len(db_response.inserted_ids)} new adverts")
 
 
 async def make_app():
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(check_for_new_adverts, "interval", days=1)
+    scheduler.start()
     exchange_rate = get_exchange_rate()
     app = web.Application()
     loop = asyncio.get_event_loop()

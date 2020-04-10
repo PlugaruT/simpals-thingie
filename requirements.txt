@@ -3,3 +3,4 @@ black
 flask
 motor
 requests
+apscheduler
